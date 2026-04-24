@@ -11,6 +11,14 @@ import {
   getAttendanceYearMonthFromWorkbook,
   parseAttendanceWorkbook,
 } from "@/lib/attendance/parse-attendance-excel"
+import {
+  deleteAttendanceAndWarningsForMonth,
+  insertAttendanceRecordsWithFallback,
+  insertWarningRowsWithFallback,
+  isReplaceAttendanceRpcMissing,
+  type AttendanceInsertRow,
+  type WarningInsertRow,
+} from "@/lib/attendance/supabase-attendance-upload"
 
 interface UploadCardProps {
   onUpload?: (file: File) => void
@@ -82,6 +90,10 @@ export function UploadCard({ onUpload }: UploadCardProps) {
     setIsUploading(true)
 
     try {
+      const buffer = await uploadedFile.arrayBuffer()
+      const workbook = XLSX.read(buffer, { type: "array" })
+      const { year, month } = getAttendanceYearMonthFromWorkbook(workbook)
+
       const {
         data: { user },
         error: userError,
@@ -91,35 +103,39 @@ export function UploadCard({ onUpload }: UploadCardProps) {
         throw new Error("로그인 사용자 정보를 찾을 수 없습니다.")
       }
 
-      const buffer = await uploadedFile.arrayBuffer()
-      const workbook = XLSX.read(buffer, { type: "array" })
-      const { year, month } = getAttendanceYearMonthFromWorkbook(workbook)
+      const parsed = parseAttendanceWorkbook(workbook)
 
-      // 업로드 시작 전 기존 데이터 선삭제 (user_id + 해당 월)
-      const monthStart = `${year}-${String(month).padStart(2, "0")}-01`
-      const nextMonthDate = new Date(year, month, 1)
-      const nextMonthStart = `${nextMonthDate.getFullYear()}-${String(nextMonthDate.getMonth() + 1).padStart(2, "0")}-01`
-
-      const { error: deleteMonthRecordsError } = await supabase
-        .from("attendance_records")
-        .delete()
+      const { data: existingUploadedRows, error: existingFilesSelectError } = await supabase
+        .from("uploaded_files")
+        .select("file_path")
         .eq("user_id", user.id)
-        .gte("work_date", monthStart)
-        .lt("work_date", nextMonthStart)
+        .eq("year", year)
+        .eq("month", month)
 
-      if (deleteMonthRecordsError) {
-        throw new Error(deleteMonthRecordsError.message)
+      if (existingFilesSelectError) {
+        throw new Error(existingFilesSelectError.message)
       }
 
-      const { error: deleteMonthWarningsError } = await supabase
-        .from("warnings")
+      const { error: deleteUploadedFilesMetaError } = await supabase
+        .from("uploaded_files")
         .delete()
         .eq("user_id", user.id)
-        .gte("work_date", monthStart)
-        .lt("work_date", nextMonthStart)
+        .eq("year", year)
+        .eq("month", month)
 
-      if (deleteMonthWarningsError) {
-        throw new Error(deleteMonthWarningsError.message)
+      if (deleteUploadedFilesMetaError) {
+        throw new Error(deleteUploadedFilesMetaError.message)
+      }
+
+      const pathsToRemove = (existingUploadedRows ?? [])
+        .map((row) => row.file_path)
+        .filter((p): p is string => typeof p === "string" && p.length > 0)
+
+      if (pathsToRemove.length > 0) {
+        const { error: storageRemoveError } = await supabase.storage.from("attendance-files").remove(pathsToRemove)
+        if (storageRemoveError) {
+          throw new Error(storageRemoveError.message)
+        }
       }
 
       const safeFileName = uploadedFile.name.replace(/[^a-zA-Z0-9._-]/g, "_")
@@ -154,166 +170,80 @@ export function UploadCard({ onUpload }: UploadCardProps) {
         throw new Error("업로드 파일 식별자를 가져오지 못했습니다.")
       }
 
-      const parsed = parseAttendanceWorkbook(workbook)
-
-      if (parsed.records.length > 0) {
-        const attendanceRowsDedup = new Map<
-          string,
-          {
-            user_id: string
-            source_file_id: string
-            work_date: string
-            check_in: string | null
-            check_out: string | null
-            total_minutes: number
-            is_late: boolean
-            is_under_9h: boolean
-            overtime_minutes: number
-            is_special_workday: boolean
-            work_status: string
-            year: number
-            month: number
-          }
-        >()
-
-        for (const record of parsed.records) {
-          attendanceRowsDedup.set(record.workDate, {
-            user_id: user.id,
-            source_file_id: sourceFileId,
-            work_date: record.workDate,
-            check_in: record.checkInTime,
-            check_out: record.checkOutTime,
-            total_minutes: record.workMinutes,
-            is_late: record.isLate,
-            is_under_9h: record.isUnder9h,
-            overtime_minutes: record.overtimeMinutes,
-            is_special_workday: record.isSpecialWorkday,
-            work_status: record.attendanceStatus,
-            year: parsed.year,
-            month: parsed.month,
-          })
-        }
-        const attendanceRows = Array.from(attendanceRowsDedup.values())
-
-        const targetDates = attendanceRows.map((row) => row.work_date)
-        if (targetDates.length > 0) {
-          const { error: deleteSameDatesError } = await supabase
-            .from("attendance_records")
-            .delete()
-            .eq("user_id", user.id)
-            .in("work_date", targetDates)
-          if (deleteSameDatesError) {
-            throw new Error(deleteSameDatesError.message)
-          }
-        }
-
-        const { error: attendanceInsertError } = await supabase.from("attendance_records").insert(attendanceRows)
-        if (attendanceInsertError?.message.includes("'work_status' column")) {
-          const fallbackRows = attendanceRows.map((row) => ({
-            user_id: row.user_id,
-            source_file_id: row.source_file_id,
-            work_date: row.work_date,
-            check_in: row.check_in,
-            check_out: row.check_out,
-            total_minutes: row.total_minutes,
-            is_late: row.is_late,
-            is_under_9h: row.is_under_9h,
-            overtime_minutes: row.overtime_minutes,
-            is_special_workday: row.is_special_workday,
-            year: row.year,
-            month: row.month,
-          }))
-          const { error: fallbackInsertError } = await supabase.from("attendance_records").insert(fallbackRows)
-          if (fallbackInsertError) {
-            throw new Error(fallbackInsertError.message)
-          }
-        } else if (attendanceInsertError) {
-          throw new Error(attendanceInsertError.message)
-        }
+      const attendanceRowsDedup = new Map<string, AttendanceInsertRow>()
+      for (const record of parsed.records) {
+        attendanceRowsDedup.set(record.workDate, {
+          user_id: user.id,
+          source_file_id: sourceFileId,
+          work_date: record.workDate,
+          check_in: record.checkInTime,
+          check_out: record.checkOutTime,
+          total_minutes: record.workMinutes,
+          is_late: record.isLate,
+          is_under_9h: record.isUnder9h,
+          overtime_minutes: record.overtimeMinutes,
+          is_special_workday: record.isSpecialWorkday,
+          work_status: record.attendanceStatus,
+          year,
+          month,
+        })
       }
+      const attendanceRows = Array.from(attendanceRowsDedup.values())
 
-      if (parsed.warnings.length > 0) {
-        const warningRowsDedup = new Map<
-          string,
-          {
-            user_id: string
-            source_file_id: string
-            work_date: string
-            warning_type: string
-            warning_message: string
-            year: number
-            month: number
-          }
-        >()
-        for (const warning of parsed.warnings) {
-          const warningMessage = `${warning.warningMessage} (출근 원본: ${warning.checkInRawValue ?? "-"}, 퇴근 원본: ${warning.checkOutRawValue ?? "-"})`
-          const warningKey = `${user.id}|${warning.workDate}|${warning.warningType}|${warningMessage}`
-          warningRowsDedup.set(warningKey, {
-            user_id: user.id,
-            source_file_id: sourceFileId,
-            work_date: warning.workDate,
-            warning_type: warning.warningType,
-            warning_message: warningMessage,
-            year: parsed.year,
-            month: parsed.month,
-          })
+      const warningRowsDedup = new Map<string, WarningInsertRow>()
+      for (const warning of parsed.warnings) {
+        const warningMessage = `${warning.warningMessage} (출근 원본: ${warning.checkInRawValue ?? "-"}, 퇴근 원본: ${warning.checkOutRawValue ?? "-"})`
+        const warningKey = `${user.id}|${warning.workDate}|${warning.warningType}|${warningMessage}`
+        warningRowsDedup.set(warningKey, {
+          user_id: user.id,
+          source_file_id: sourceFileId,
+          work_date: warning.workDate,
+          warning_type: warning.warningType,
+          warning_message: warningMessage,
+          year,
+          month,
+        })
+      }
+      const warningRowsWithWarningMessage = Array.from(warningRowsDedup.values())
+
+      const pAttendance = attendanceRows.map((row) => ({
+        work_date: row.work_date,
+        check_in: row.check_in,
+        check_out: row.check_out,
+        total_minutes: row.total_minutes,
+        is_late: row.is_late,
+        is_under_9h: row.is_under_9h,
+        overtime_minutes: row.overtime_minutes,
+        is_special_workday: row.is_special_workday,
+        work_status: row.work_status,
+      }))
+
+      const pWarnings = warningRowsWithWarningMessage.map((w) => ({
+        work_date: w.work_date,
+        warning_type: w.warning_type,
+        warning_message: w.warning_message,
+      }))
+
+      const { error: rpcError } = await supabase.rpc("replace_attendance_for_month", {
+        p_user_id: user.id,
+        p_year: year,
+        p_month: month,
+        p_source_file_id: sourceFileId,
+        p_attendance: pAttendance,
+        p_warnings: pWarnings,
+      })
+
+      if (rpcError) {
+        if (!isReplaceAttendanceRpcMissing(rpcError)) {
+          throw new Error(rpcError.message)
         }
-        const warningRowsWithWarningMessage = Array.from(warningRowsDedup.values())
-
-        const { error: warningsInsertError } = await supabase.from("warnings").insert(warningRowsWithWarningMessage)
-
-        if (warningsInsertError?.message.includes("'warning_type' column")) {
-          const warningRowsWithType = warningRowsWithWarningMessage.map((warning) => ({
-            user_id: warning.user_id,
-            source_file_id: warning.source_file_id,
-            work_date: warning.work_date,
-            type: warning.warning_type,
-            warning_message: warning.warning_message,
-            year: warning.year,
-            month: warning.month,
-          }))
-
-          const { error: typeInsertError } = await supabase.from("warnings").insert(warningRowsWithType)
-          if (typeInsertError?.message.includes("'warning_message' column")) {
-            const warningRowsWithTypeAndMessage = warningRowsWithType.map((warning) => ({
-              user_id: warning.user_id,
-              source_file_id: warning.source_file_id,
-              work_date: warning.work_date,
-              type: warning.type,
-              message: warning.warning_message,
-              year: warning.year,
-              month: warning.month,
-            }))
-
-            const { error: fallbackWithTypeError } = await supabase.from("warnings").insert(warningRowsWithTypeAndMessage)
-            if (fallbackWithTypeError) {
-              throw new Error(fallbackWithTypeError.message)
-            }
-          } else if (typeInsertError) {
-            throw new Error(typeInsertError.message)
-          }
-        } else if (warningsInsertError?.message.includes("'warning_message' column")) {
-          const warningRowsWithMessage = warningRowsWithWarningMessage.map((warning) => ({
-            user_id: warning.user_id,
-            source_file_id: warning.source_file_id,
-            work_date: warning.work_date,
-            warning_type: warning.warning_type,
-            message: warning.warning_message,
-            year: warning.year,
-            month: warning.month,
-          }))
-
-          const { error: fallbackWarningsInsertError } = await supabase.from("warnings").insert(warningRowsWithMessage)
-          if (fallbackWarningsInsertError) {
-            throw new Error(fallbackWarningsInsertError.message)
-          }
-        } else if (warningsInsertError) {
-          throw new Error(warningsInsertError.message)
-        }
+        await deleteAttendanceAndWarningsForMonth(supabase, user.id, year, month)
+        await insertAttendanceRecordsWithFallback(supabase, attendanceRows)
+        await insertWarningRowsWithFallback(supabase, warningRowsWithWarningMessage)
       }
 
       onUpload?.(uploadedFile)
-      setSuccessMessage("파싱 완료")
+      setSuccessMessage(`${year}년 ${month}월 데이터가 새 파일로 교체되었습니다`)
       setUploadedFile(null)
     } catch (error) {
       const message = error instanceof Error ? error.message : "파일 업로드 중 오류가 발생했습니다."

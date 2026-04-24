@@ -91,7 +91,8 @@ type ProfileNameRow = {
 
 type StatusKind = "SPECIAL_WORK" | "OVERTIME" | "LATE" | null
 
-const TEMPLATE_FILE_PATH = "/templates/3월 3Camp 기술팀 출근부.xlsx"
+/** `public/templates/template.xlsx` → 브라우저에서는 `/templates/template.xlsx` 로 요청 */
+const TEMPLATE_FILE_PATH = "/templates/template.xlsx"
 const TITLE_CELL = "A5"
 const TEMPLATE_DATE_START_ROW = 8
 const TEMPLATE_DATE_END_ROW = 38
@@ -732,6 +733,14 @@ export default function EmployeeDashboardPage() {
   )
 
   const handleGenerateFinalExcel = async () => {
+    const templateFetchUrl =
+      typeof window !== "undefined" ? new URL(TEMPLATE_FILE_PATH, window.location.origin).toString() : TEMPLATE_FILE_PATH
+    const templateLogContext = () => ({
+      publicRelativePath: TEMPLATE_FILE_PATH,
+      publicFileSystemPath: `public${TEMPLATE_FILE_PATH}`,
+      fetchUrl: templateFetchUrl,
+    })
+
     try {
       setIsGeneratingFinalExcel(true)
 
@@ -740,7 +749,7 @@ export default function EmployeeDashboardPage() {
         .select("user_id, work_date, check_in, check_out, total_minutes")
 
       if (attendanceError) {
-        console.log("[final-collect-excel] attendance query error:", attendanceError.message)
+        console.error("[final-collect-excel] attendance query error:", attendanceError.message, templateLogContext())
         return
       }
 
@@ -749,7 +758,7 @@ export default function EmployeeDashboardPage() {
         .select("id, name")
 
       if (profileError) {
-        console.log("[final-collect-excel] profile query error:", profileError.message)
+        console.error("[final-collect-excel] profile query error:", profileError.message, templateLogContext())
         return
       }
 
@@ -777,7 +786,11 @@ export default function EmployeeDashboardPage() {
 
       const templateResponse = await fetch(encodeURI(TEMPLATE_FILE_PATH))
       if (!templateResponse.ok) {
-        console.log("[final-collect-excel] template fetch error:", templateResponse.status, TEMPLATE_FILE_PATH)
+        console.error("[final-collect-excel] template fetch failed", {
+          status: templateResponse.status,
+          statusText: templateResponse.statusText,
+          ...templateLogContext(),
+        })
         return
       }
 
@@ -785,11 +798,11 @@ export default function EmployeeDashboardPage() {
       const templateWorkbook = XLSX.read(templateBuffer, { type: "array", cellStyles: true })
       const templateSheetName = templateWorkbook.SheetNames[0]
       if (!templateSheetName) {
-        console.log("[final-collect-excel] template sheet not found")
+        console.error("[final-collect-excel] template workbook has no sheets", templateLogContext())
         return
       }
       const templateSheet = templateWorkbook.Sheets[templateSheetName]
-      setCellString(templateSheet, TITLE_CELL, `${resolvedMonth}월 3Camp 기술팀 출근부`)
+      setCellString(templateSheet, TITLE_CELL, `${yearFromDate}년 ${resolvedMonth}월 3Camp 기술팀 출근부`)
 
       const mappedRows: Array<AttendanceExportRow & { name: string; day: number }> = []
       for (const row of dedupedRows) {
@@ -871,9 +884,10 @@ export default function EmployeeDashboardPage() {
         templateWorkbook.SheetNames[0] = targetSheetName
       }
 
-      XLSX.writeFile(templateWorkbook, `${resolvedMonth}월 3Camp 기술팀 출근부.xlsx`)
+      const downloadFileName = `${yearFromDate}년 ${resolvedMonth}월 3Camp 기술팀 출근부.xlsx`
+      XLSX.writeFile(templateWorkbook, downloadFileName)
     } catch (error) {
-      console.log("[final-collect-excel] unexpected error:", error)
+      console.error("[final-collect-excel] unexpected error:", error, templateLogContext())
     } finally {
       setIsGeneratingFinalExcel(false)
     }
