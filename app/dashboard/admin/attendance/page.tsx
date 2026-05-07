@@ -25,7 +25,7 @@ type WarningRow = {
   warning_message: string | null
 }
 
-const ADMIN_EMPLOYEES = ["장영광", "심종하", "오민석", "권태준", "김정훈", "이민성", "김희수", "김선태", "이주남"] as const
+const ADMIN_EMPLOYEES = ["장영광", "심종하", "오민석", "권태준", "김정훈", "이민성", "김희수", "김선태", "윤효준"] as const
 const ALL_EMPLOYEES_LABEL = "전체 직원"
 
 const normalizeName = (name: string) => name.trim().normalize("NFC")
