@@ -35,7 +35,7 @@ const CTST_TECH_EMPLOYEES = [
   "이민성",
   "김희수",
   "김선태",
-  "이주남",
+  "윤효준",
 ] as const
 
 const ADMIN_DEFAULT_YEAR = 2026

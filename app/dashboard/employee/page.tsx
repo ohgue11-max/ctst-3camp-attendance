@@ -116,7 +116,7 @@ const ADMIN_EMPLOYEE_ORDER = [
   "이민성",
   "김희수",
   "김선태",
-  "이주남",
+  "윤효준",
 ] as const
 const ALL_EMPLOYEES_LABEL = "전체 직원"
 const ADMIN_EMPLOYEE_FILTER_OPTIONS = [ALL_EMPLOYEES_LABEL, ...ADMIN_EMPLOYEE_ORDER] as const
@@ -162,7 +162,7 @@ const EMPLOYEE_COLUMN_MAP: Record<string, { checkInCol: string; checkOutCol: str
   이민성: { checkInCol: "M", checkOutCol: "N" },
   김희수: { checkInCol: "O", checkOutCol: "P" },
   김선태: { checkInCol: "Q", checkOutCol: "R" },
-  이주남: { checkInCol: "S", checkOutCol: "T" },
+  윤효준: { checkInCol: "S", checkOutCol: "T" },
 }
 
 /** 최종 취합 엑셀 범례·상태 칠하기 전용 (ARGB 8자리만 사용) */
@@ -1974,7 +1974,7 @@ export default function EmployeeDashboardPage() {
         { name: "이민성", startCol: "M", endCol: "N" },
         { name: "김희수", startCol: "O", endCol: "P" },
         { name: "김선태", startCol: "Q", endCol: "R" },
-        { name: "이주남", startCol: "S", endCol: "T" },
+        { name: "윤효준", startCol: "S", endCol: "T" },
       ]
       for (const h of employeeHeaderMerges) {
         const range = `${h.startCol}2:${h.endCol}2`
