@@ -11,27 +11,54 @@ type DashboardLayoutProps = {
 export default function DashboardAuthLayout({ children }: DashboardLayoutProps) {
   const router = useRouter()
   const [isCheckingSession, setIsCheckingSession] = useState(true)
+  const [isLoggingOut, setIsLoggingOut] = useState(false)
 
   useEffect(() => {
     let isMounted = true
+    if (typeof window !== "undefined") {
+      setIsLoggingOut(window.sessionStorage.getItem("ctst:isLoggingOut") === "1")
+    }
+  }, [])
 
+  useEffect(() => {
+    let isMounted = true
     const checkSession = async () => {
-      const { data, error } = await supabase.auth.getSession()
-
-      if (error) {
-        console.error("[dashboard] session check error:", error)
-      }
-
-      if (!data.session) {
-        if (isMounted) {
-          setIsCheckingSession(true)
-        }
+      if (isLoggingOut) {
+        if (isMounted) setIsCheckingSession(true)
         router.replace("/login")
+        if (typeof window !== "undefined") {
+          window.setTimeout(() => {
+            window.location.href = "/login"
+          }, 300)
+        }
         return
       }
+      try {
+        const { data, error } = await supabase.auth.getSession()
 
-      if (isMounted) {
-        setIsCheckingSession(false)
+        if (error) {
+          console.error("[dashboard] session check error:", error)
+        }
+
+        if (!data.session) {
+          if (isMounted) {
+            setIsCheckingSession(true)
+          }
+          router.replace("/login")
+          if (typeof window !== "undefined") {
+            window.setTimeout(() => {
+              window.location.href = "/login"
+            }, 300)
+          }
+          return
+        }
+
+        if (isMounted) {
+          setIsCheckingSession(false)
+        }
+      } catch (error) {
+        console.error("[dashboard] unexpected session error:", error)
+        router.replace("/login")
       }
     }
 
@@ -40,6 +67,7 @@ export default function DashboardAuthLayout({ children }: DashboardLayoutProps) 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, session) => {
+      if (isLoggingOut) return
       if (!session) {
         if (isMounted) {
           setIsCheckingSession(true)
@@ -55,7 +83,7 @@ export default function DashboardAuthLayout({ children }: DashboardLayoutProps) 
       isMounted = false
       subscription.unsubscribe()
     }
-  }, [router])
+  }, [router, isLoggingOut])
 
   if (isCheckingSession) {
     return (

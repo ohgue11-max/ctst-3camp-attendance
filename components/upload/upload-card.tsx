@@ -7,15 +7,14 @@ import { Upload, FileSpreadsheet, CheckCircle, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import * as XLSX from "xlsx"
 import { supabase } from "@/lib/supabase/client"
+import { parseAttendanceWorkbook, resolveUploadYearMonth } from "@/lib/attendance/parse-attendance-excel"
 import {
-  getAttendanceYearMonthFromWorkbook,
-  parseAttendanceWorkbook,
-} from "@/lib/attendance/parse-attendance-excel"
-import {
-  deleteAttendanceAndWarningsForMonth,
+  assertMonthUploadDataCleared,
+  deleteAttendanceRecordsForMonth,
+  deleteUploadedFileRecordsForMonth,
+  deleteWarningsForMonth,
   insertAttendanceRecordsWithFallback,
   insertWarningRowsWithFallback,
-  isReplaceAttendanceRpcMissing,
   type AttendanceInsertRow,
   type WarningInsertRow,
 } from "@/lib/attendance/supabase-attendance-upload"
@@ -92,7 +91,6 @@ export function UploadCard({ onUpload }: UploadCardProps) {
     try {
       const buffer = await uploadedFile.arrayBuffer()
       const workbook = XLSX.read(buffer, { type: "array" })
-      const { year, month } = getAttendanceYearMonthFromWorkbook(workbook)
 
       const {
         data: { user },
@@ -103,78 +101,55 @@ export function UploadCard({ onUpload }: UploadCardProps) {
         throw new Error("로그인 사용자 정보를 찾을 수 없습니다.")
       }
 
+      const { data: profileRow, error: profileError } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("id", user.id)
+        .maybeSingle()
+
+      if (profileError) {
+        throw new Error(profileError.message)
+      }
+      if (profileRow?.role === "admin") {
+        throw new Error("관리자는 근태 파일을 업로드할 수 없습니다.")
+      }
+
       const parsed = parseAttendanceWorkbook(workbook)
+      /** D1·실제 work_date 기준(파일명 미사용) */
+      const { year, month } = resolveUploadYearMonth(parsed)
 
-      const { data: existingUploadedRows, error: existingFilesSelectError } = await supabase
-        .from("uploaded_files")
-        .select("file_path")
-        .eq("user_id", user.id)
-        .eq("year", year)
-        .eq("month", month)
+      console.log("[attendance upload] delete old records", user.id, year, month)
+      await deleteAttendanceRecordsForMonth(supabase, user.id, year, month)
+      await deleteWarningsForMonth(supabase, user.id, year, month)
 
-      if (existingFilesSelectError) {
-        throw new Error(existingFilesSelectError.message)
-      }
-
-      const { error: deleteUploadedFilesMetaError } = await supabase
-        .from("uploaded_files")
-        .delete()
-        .eq("user_id", user.id)
-        .eq("year", year)
-        .eq("month", month)
-
-      if (deleteUploadedFilesMetaError) {
-        throw new Error(deleteUploadedFilesMetaError.message)
-      }
-
-      const pathsToRemove = (existingUploadedRows ?? [])
-        .map((row) => row.file_path)
-        .filter((p): p is string => typeof p === "string" && p.length > 0)
+      const pathsToRemove = await deleteUploadedFileRecordsForMonth(supabase, user.id, year, month)
+      await assertMonthUploadDataCleared(supabase, user.id, year, month)
 
       if (pathsToRemove.length > 0) {
         const { error: storageRemoveError } = await supabase.storage.from("attendance-files").remove(pathsToRemove)
         if (storageRemoveError) {
-          throw new Error(storageRemoveError.message)
+          console.warn("[attendance upload] storage remove skipped:", storageRemoveError)
         }
       }
 
       const safeFileName = uploadedFile.name.replace(/[^a-zA-Z0-9._-]/g, "_")
-      const filePath = `${user.id}/${year}/${String(month).padStart(2, "0")}/${Date.now()}-${safeFileName}`
+      const candidatePath = `${user.id}/${year}/${String(month).padStart(2, "0")}/${Date.now()}-${safeFileName}`
 
-      const { error: uploadError } = await supabase.storage
+      let filePath: string | null = null
+      const { error: storageUploadError } = await supabase.storage
         .from("attendance-files")
-        .upload(filePath, uploadedFile, { upsert: false })
+        .upload(candidatePath, uploadedFile, { upsert: false })
 
-      if (uploadError) {
-        throw new Error(uploadError.message)
-      }
-
-      const { data: uploadedFileRow, error: insertError } = await supabase
-        .from("uploaded_files")
-        .insert({
-          user_id: user.id,
-          file_name: uploadedFile.name,
-          file_path: filePath,
-          year,
-          month,
-        })
-        .select("id")
-        .single()
-
-      if (insertError) {
-        throw new Error(insertError.message)
-      }
-
-      const sourceFileId = uploadedFileRow?.id
-      if (!sourceFileId) {
-        throw new Error("업로드 파일 식별자를 가져오지 못했습니다.")
+      if (storageUploadError) {
+        console.warn("[attendance upload] storage upload skipped:", storageUploadError)
+      } else {
+        filePath = candidatePath
       }
 
       const attendanceRowsDedup = new Map<string, AttendanceInsertRow>()
       for (const record of parsed.records) {
         attendanceRowsDedup.set(record.workDate, {
           user_id: user.id,
-          source_file_id: sourceFileId,
           work_date: record.workDate,
           check_in: record.checkInTime,
           check_out: record.checkOutTime,
@@ -189,6 +164,7 @@ export function UploadCard({ onUpload }: UploadCardProps) {
         })
       }
       const attendanceRows = Array.from(attendanceRowsDedup.values())
+      console.log("[attendance upload] insert records count:", attendanceRows.length)
 
       const warningRowsDedup = new Map<string, WarningInsertRow>()
       for (const warning of parsed.warnings) {
@@ -196,7 +172,6 @@ export function UploadCard({ onUpload }: UploadCardProps) {
         const warningKey = `${user.id}|${warning.workDate}|${warning.warningType}|${warningMessage}`
         warningRowsDedup.set(warningKey, {
           user_id: user.id,
-          source_file_id: sourceFileId,
           work_date: warning.workDate,
           warning_type: warning.warningType,
           warning_message: warningMessage,
@@ -205,49 +180,38 @@ export function UploadCard({ onUpload }: UploadCardProps) {
         })
       }
       const warningRowsWithWarningMessage = Array.from(warningRowsDedup.values())
+      console.log("[attendance upload] insert warnings count:", warningRowsWithWarningMessage.length)
 
-      const pAttendance = attendanceRows.map((row) => ({
-        work_date: row.work_date,
-        check_in: row.check_in,
-        check_out: row.check_out,
-        total_minutes: row.total_minutes,
-        is_late: row.is_late,
-        is_under_9h: row.is_under_9h,
-        overtime_minutes: row.overtime_minutes,
-        is_special_workday: row.is_special_workday,
-        work_status: row.work_status,
-      }))
+      await insertAttendanceRecordsWithFallback(supabase, attendanceRows)
+      await insertWarningRowsWithFallback(supabase, warningRowsWithWarningMessage)
 
-      const pWarnings = warningRowsWithWarningMessage.map((w) => ({
-        work_date: w.work_date,
-        warning_type: w.warning_type,
-        warning_message: w.warning_message,
-      }))
-
-      const { error: rpcError } = await supabase.rpc("replace_attendance_for_month", {
-        p_user_id: user.id,
-        p_year: year,
-        p_month: month,
-        p_source_file_id: sourceFileId,
-        p_attendance: pAttendance,
-        p_warnings: pWarnings,
-      })
-
-      if (rpcError) {
-        if (!isReplaceAttendanceRpcMissing(rpcError)) {
-          throw new Error(rpcError.message)
+      if (filePath) {
+        try {
+          const { error: fileError } = await supabase.from("uploaded_files").insert({
+            user_id: user.id,
+            file_name: uploadedFile.name,
+            file_path: filePath,
+            year,
+            month,
+          })
+          if (fileError) {
+            console.warn("[attendance upload] uploaded_files skipped:", fileError)
+          }
+        } catch (fileError) {
+          console.warn("[attendance upload] uploaded_files skipped:", fileError)
         }
-        await deleteAttendanceAndWarningsForMonth(supabase, user.id, year, month)
-        await insertAttendanceRecordsWithFallback(supabase, attendanceRows)
-        await insertWarningRowsWithFallback(supabase, warningRowsWithWarningMessage)
       }
 
       onUpload?.(uploadedFile)
-      setSuccessMessage(`${year}년 ${month}월 데이터가 새 파일로 교체되었습니다`)
+      setSuccessMessage(`${year}년 ${month}월 근태 데이터가 새 파일로 교체되었습니다`)
       setUploadedFile(null)
     } catch (error) {
-      const message = error instanceof Error ? error.message : "파일 업로드 중 오류가 발생했습니다."
-      setErrorMessage(message)
+      const raw = error instanceof Error ? error.message : ""
+      if (raw === "관리자는 근태 파일을 업로드할 수 없습니다.") {
+        setErrorMessage(raw)
+      } else {
+        setErrorMessage("업로드 중 오류가 발생했습니다. 다시 시도해주세요.")
+      }
     } finally {
       uploadInProgressRef.current = false
       setIsUploading(false)

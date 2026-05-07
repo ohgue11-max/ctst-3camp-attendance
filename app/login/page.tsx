@@ -26,19 +26,24 @@ export default function LoginPage() {
     let isMounted = true
 
     const checkSession = async () => {
-      const { data, error } = await supabase.auth.getSession()
+      try {
+        if (typeof window !== "undefined") {
+          window.sessionStorage.removeItem("ctst:isLoggingOut")
+        }
+        const { data, error } = await supabase.auth.getSession()
 
-      if (error) {
-        console.error("[login] session check error:", error)
-      }
+        if (error) {
+          console.error("[login] session check error:", error)
+        }
 
-      if (data.session) {
-        router.replace("/dashboard")
-        return
-      }
-
-      if (isMounted) {
-        setIsCheckingSession(false)
+        if (data.session) {
+          router.replace("/dashboard/employee")
+          return
+        }
+      } finally {
+        if (isMounted) {
+          setIsCheckingSession(false)
+        }
       }
     }
 
@@ -74,7 +79,10 @@ export default function LoginPage() {
         return
       }
 
-      router.push("/dashboard")
+      if (typeof window !== "undefined") {
+        window.sessionStorage.removeItem("ctst:isLoggingOut")
+      }
+      router.push("/dashboard/employee")
     } catch (error) {
       console.error("[login] unexpected error:", error)
       setErrorMessage(error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다.")

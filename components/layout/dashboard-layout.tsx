@@ -26,11 +26,14 @@ export function DashboardLayout({
   const [currentUserRole, setCurrentUserRole] = useState<UserRole>(isAdmin ? "admin" : "employee")
   const [isProfileLoading, setIsProfileLoading] = useState(true)
   const [profileError, setProfileError] = useState<string | null>(null)
+  const isLoggingOut =
+    typeof window !== "undefined" && window.sessionStorage.getItem("ctst:isLoggingOut") === "1"
 
   useEffect(() => {
     let isMounted = true
 
     const loadCurrentUserProfile = async () => {
+      if (isLoggingOut) return
       setIsProfileLoading(true)
       setProfileError(null)
 
@@ -51,7 +54,7 @@ export function DashboardLayout({
       if (!user?.id) {
         console.error("[dashboard-layout] no authenticated user found")
         if (isMounted) {
-          setProfileError("사용자 정보를 불러올 수 없습니다")
+          setProfileError(isLoggingOut ? null : "사용자 정보를 불러올 수 없습니다")
           setIsProfileLoading(false)
         }
         return
@@ -101,7 +104,7 @@ export function DashboardLayout({
     return () => {
       isMounted = false
     }
-  }, [])
+  }, [isLoggingOut])
 
   if (isProfileLoading) {
     return (
@@ -111,7 +114,7 @@ export function DashboardLayout({
     )
   }
 
-  if (profileError) {
+  if (profileError && !isLoggingOut) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[#e9edf1] px-4">
         <div className="rounded-xl border border-red-200 bg-red-50 px-5 py-3 text-base font-medium text-red-700">

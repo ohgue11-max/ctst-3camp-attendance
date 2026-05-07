@@ -3,7 +3,7 @@ import { getMonthIsoRange } from "@/lib/attendance/month-date-range"
 
 export type AttendanceInsertRow = {
   user_id: string
-  source_file_id: string
+  source_file_id?: string
   work_date: string
   check_in: string | null
   check_out: string | null
@@ -19,7 +19,7 @@ export type AttendanceInsertRow = {
 
 export type WarningInsertRow = {
   user_id: string
-  source_file_id: string
+  source_file_id?: string
   work_date: string
   warning_type: string
   warning_message: string
@@ -27,49 +27,137 @@ export type WarningInsertRow = {
   month: number
 }
 
-/** user_id + year/month 및 동일 달 work_date 범위로 이중 삭제(레거시 행 포함) */
-export async function deleteAttendanceAndWarningsForMonth(
+/** user_id + (year·month 컬럼 일치 또는 해당 월 work_date) — 레거시 행 포함 삭제 */
+function buildMonthOverlapOrFilter(year: number, month: number): string {
+  const { monthStart, nextMonthStart } = getMonthIsoRange(year, month)
+  return `and(year.eq.${year},month.eq.${month}),and(work_date.gte.${monthStart},work_date.lt.${nextMonthStart})`
+}
+
+export async function deleteAttendanceRecordsForMonth(
   supabase: SupabaseClient,
   userId: string,
   year: number,
   month: number,
 ): Promise<void> {
-  const { monthStart, nextMonthStart } = getMonthIsoRange(year, month)
+  const { error } = await supabase
+    .from("attendance_records")
+    .delete()
+    .eq("user_id", userId)
+    .or(buildMonthOverlapOrFilter(year, month))
 
-  const ops = [
-    supabase.from("attendance_records").delete().eq("user_id", userId).eq("year", year).eq("month", month),
-    supabase
-      .from("attendance_records")
-      .delete()
-      .eq("user_id", userId)
-      .gte("work_date", monthStart)
-      .lt("work_date", nextMonthStart),
-    supabase.from("warnings").delete().eq("user_id", userId).eq("year", year).eq("month", month),
-    supabase
-      .from("warnings")
-      .delete()
-      .eq("user_id", userId)
-      .gte("work_date", monthStart)
-      .lt("work_date", nextMonthStart),
-  ]
-
-  for (const q of ops) {
-    const { error } = await q
-    if (error) {
-      throw new Error(error.message)
-    }
+  if (error) {
+    console.warn("[attendance upload] delete attendance_records failed", error)
   }
 }
 
-export function isReplaceAttendanceRpcMissing(error: { message?: string; code?: string }): boolean {
-  const m = error.message ?? ""
-  const c = error.code ?? ""
-  return (
-    c === "PGRST202" ||
-    m.includes("Could not find the function") ||
-    m.includes("replace_attendance_for_month") ||
-    m.includes("schema cache")
-  )
+export async function deleteWarningsForMonth(
+  supabase: SupabaseClient,
+  userId: string,
+  year: number,
+  month: number,
+): Promise<void> {
+  const { error } = await supabase
+    .from("warnings")
+    .delete()
+    .eq("user_id", userId)
+    .or(buildMonthOverlapOrFilter(year, month))
+
+  if (error) {
+    console.warn("[attendance upload] delete warnings failed", error)
+  }
+}
+
+/**
+ * 삭제 직후 잔여 행 참고용. 절대 throw 하지 않음.
+ */
+export async function assertMonthUploadDataCleared(
+  supabase: SupabaseClient,
+  userId: string,
+  year: number,
+  month: number,
+): Promise<void> {
+  const orFilter = buildMonthOverlapOrFilter(year, month)
+
+  const [{ count: attendanceLeft, error: attErr }, { count: warningsLeft, error: warErr }, { count: filesLeft, error: fileErr }] =
+    await Promise.all([
+      supabase
+        .from("attendance_records")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .or(orFilter),
+      supabase
+        .from("warnings")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .or(orFilter),
+      supabase
+        .from("uploaded_files")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .eq("year", year)
+        .eq("month", month),
+    ])
+
+  if (attErr || warErr || fileErr) {
+    console.warn("[attendance upload] post-delete count query failed", {
+      attErr,
+      warErr,
+      fileErr,
+      userId,
+      year,
+      month,
+    })
+    return
+  }
+
+  if ((attendanceLeft ?? 0) > 0 || (warningsLeft ?? 0) > 0 || (filesLeft ?? 0) > 0) {
+    console.warn("[attendance upload] rows remain after delete", {
+      attendanceLeft,
+      warningsLeft,
+      filesLeft,
+      userId,
+      year,
+      month,
+    })
+  }
+}
+
+/**
+ * uploaded_files 메타 삭제 후 스토리지 정리용 file_path 목록. 실패 시 빈 배열.
+ */
+export async function deleteUploadedFileRecordsForMonth(
+  supabase: SupabaseClient,
+  userId: string,
+  year: number,
+  month: number,
+): Promise<string[]> {
+  const { data: existingUploadedRows, error: selectError } = await supabase
+    .from("uploaded_files")
+    .select("file_path")
+    .eq("user_id", userId)
+    .eq("year", year)
+    .eq("month", month)
+
+  if (selectError) {
+    console.warn("[attendance upload] delete uploaded_files select failed", selectError)
+    return []
+  }
+
+  const { error: deleteError } = await supabase
+    .from("uploaded_files")
+    .delete()
+    .eq("user_id", userId)
+    .eq("year", year)
+    .eq("month", month)
+
+  if (deleteError) {
+    console.warn("[attendance upload] delete uploaded_files failed", deleteError)
+    return []
+  }
+
+  return (existingUploadedRows ?? [])
+    .map((row) => row.file_path)
+    .filter((p): p is string => typeof p === "string" && p.length > 0)
 }
 
 export async function insertAttendanceRecordsWithFallback(
@@ -78,28 +166,19 @@ export async function insertAttendanceRecordsWithFallback(
 ): Promise<void> {
   if (attendanceRows.length === 0) return
 
-  const { error: attendanceInsertError } = await supabase.from("attendance_records").insert(attendanceRows)
-  if (attendanceInsertError?.message.includes("'work_status' column")) {
-    const fallbackRows = attendanceRows.map((row) => ({
-      user_id: row.user_id,
-      source_file_id: row.source_file_id,
-      work_date: row.work_date,
-      check_in: row.check_in,
-      check_out: row.check_out,
-      total_minutes: row.total_minutes,
-      is_late: row.is_late,
-      is_under_9h: row.is_under_9h,
-      overtime_minutes: row.overtime_minutes,
-      is_special_workday: row.is_special_workday,
-      year: row.year,
-      month: row.month,
-    }))
+  const { error: insertError } = await supabase.from("attendance_records").insert(attendanceRows)
+
+  if (insertError?.message.includes("'work_status' column")) {
+    const fallbackRows = attendanceRows.map((row) => {
+      const { work_status: _w, ...rest } = row
+      return rest
+    })
     const { error: fallbackInsertError } = await supabase.from("attendance_records").insert(fallbackRows)
     if (fallbackInsertError) {
       throw new Error(fallbackInsertError.message)
     }
-  } else if (attendanceInsertError) {
-    throw new Error(attendanceInsertError.message)
+  } else if (insertError) {
+    throw new Error(insertError.message)
   }
 }
 
@@ -114,7 +193,7 @@ export async function insertWarningRowsWithFallback(
   if (warningsInsertError?.message.includes("'warning_type' column")) {
     const warningRowsWithType = warningRowsWithWarningMessage.map((warning) => ({
       user_id: warning.user_id,
-      source_file_id: warning.source_file_id,
+      ...(warning.source_file_id ? { source_file_id: warning.source_file_id } : {}),
       work_date: warning.work_date,
       type: warning.warning_type,
       warning_message: warning.warning_message,
@@ -126,7 +205,7 @@ export async function insertWarningRowsWithFallback(
     if (typeInsertError?.message.includes("'warning_message' column")) {
       const warningRowsWithTypeAndMessage = warningRowsWithType.map((warning) => ({
         user_id: warning.user_id,
-        source_file_id: warning.source_file_id,
+        ...(warning.source_file_id ? { source_file_id: warning.source_file_id } : {}),
         work_date: warning.work_date,
         type: warning.type,
         message: warning.warning_message,
@@ -136,15 +215,17 @@ export async function insertWarningRowsWithFallback(
 
       const { error: fallbackWithTypeError } = await supabase.from("warnings").insert(warningRowsWithTypeAndMessage)
       if (fallbackWithTypeError) {
-        throw new Error(fallbackWithTypeError.message)
+        console.warn("[attendance upload] warnings insert failed", fallbackWithTypeError)
+        return
       }
     } else if (typeInsertError) {
-      throw new Error(typeInsertError.message)
+      console.warn("[attendance upload] warnings insert failed", typeInsertError)
+      return
     }
   } else if (warningsInsertError?.message.includes("'warning_message' column")) {
     const warningRowsWithMessage = warningRowsWithWarningMessage.map((warning) => ({
       user_id: warning.user_id,
-      source_file_id: warning.source_file_id,
+      ...(warning.source_file_id ? { source_file_id: warning.source_file_id } : {}),
       work_date: warning.work_date,
       warning_type: warning.warning_type,
       message: warning.warning_message,
@@ -154,9 +235,11 @@ export async function insertWarningRowsWithFallback(
 
     const { error: fallbackWarningsInsertError } = await supabase.from("warnings").insert(warningRowsWithMessage)
     if (fallbackWarningsInsertError) {
-      throw new Error(fallbackWarningsInsertError.message)
+      console.warn("[attendance upload] warnings insert failed", fallbackWarningsInsertError)
+      return
     }
   } else if (warningsInsertError) {
-    throw new Error(warningsInsertError.message)
+    console.warn("[attendance upload] warnings insert failed", warningsInsertError)
+    return
   }
 }

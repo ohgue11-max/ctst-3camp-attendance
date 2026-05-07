@@ -438,6 +438,29 @@ export const parseAttendanceWorkbook = (workbook: XLSX.WorkBook): ParsedAttendan
   }
 }
 
+/**
+ * 삭제·INSERT에 사용할 업로드 기준 연·월.
+ * 파일명은 쓰지 않으며, D1로 파싱된 값을 기본으로 하고
+ * 실제 파싱된 work_date(레코드·경고)가 모두 같은 달이면 그 달을 사용합니다.
+ */
+export function resolveUploadYearMonth(parsed: ParsedAttendanceResult): { year: number; month: number } {
+  const ymKeys = new Set<string>()
+  for (const r of parsed.records) {
+    const m = r.workDate.match(/^(\d{4})-(\d{2})-\d{2}$/)
+    if (m) ymKeys.add(`${m[1]}-${m[2]}`)
+  }
+  for (const w of parsed.warnings) {
+    const m = w.workDate.match(/^(\d{4})-(\d{2})-\d{2}$/)
+    if (m) ymKeys.add(`${m[1]}-${m[2]}`)
+  }
+  if (ymKeys.size === 1) {
+    const key = [...ymKeys][0]
+    const [yStr, moStr] = key.split("-")
+    return { year: Number(yStr), month: Number(moStr) }
+  }
+  return { year: parsed.year, month: parsed.month }
+}
+
 export const parseAttendanceExcelFromBuffer = async (
   buffer: ArrayBuffer,
 ): Promise<ParsedAttendanceResult> => {

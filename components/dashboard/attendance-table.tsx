@@ -15,6 +15,7 @@ import { getDateTextClassName } from "@/lib/attendance/calendar-display"
 export type AttendanceStatusBadgeLabel = "정상" | "이상 있음" | "9시간 미만"
 
 export interface AttendanceRecord {
+  employeeName?: string
   date: string
   checkIn: string
   checkOut: string
@@ -29,24 +30,32 @@ export interface AttendanceRecord {
   statusBadgeLabel: AttendanceStatusBadgeLabel
   /** 잔업(overtime) 59분 이상이면 true — 잔업 열 강조 */
   highOvertimeDay?: boolean
+  warningType?: string
+  warningMessage?: string
 }
 
 interface AttendanceTableProps {
   data: AttendanceRecord[]
   isLoading?: boolean
   emptyMessage?: string
+  showEmployeeColumn?: boolean
+  showWarningColumns?: boolean
 }
 
 export function AttendanceTable({
   data,
   isLoading = false,
   emptyMessage = "근태 데이터가 없습니다",
+  showEmployeeColumn = false,
+  showWarningColumns = false,
 }: AttendanceTableProps) {
+  const colSpan = (showEmployeeColumn ? 10 : 9) + (showWarningColumns ? 2 : 0)
   return (
     <div className="rounded-lg border border-slate-200 bg-white">
       <Table>
         <TableHeader>
           <TableRow>
+            {showEmployeeColumn && <TableHead>직원명</TableHead>}
             <TableHead>날짜</TableHead>
             <TableHead>출근시간</TableHead>
             <TableHead>퇴근시간</TableHead>
@@ -56,27 +65,30 @@ export function AttendanceTable({
             <TableHead>잔업 시간</TableHead>
             <TableHead>특근 여부</TableHead>
             <TableHead>근태 상태</TableHead>
+            {showWarningColumns && <TableHead>확인 필요 유형</TableHead>}
+            {showWarningColumns && <TableHead>확인 필요 내용</TableHead>}
           </TableRow>
         </TableHeader>
         <TableBody>
           {isLoading ? (
             <TableRow>
-              <TableCell colSpan={9} className="py-8 text-center text-slate-500">
+              <TableCell colSpan={colSpan} className="py-8 text-center text-slate-500">
                 로딩 중...
               </TableCell>
             </TableRow>
           ) : data.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={9} className="py-8 text-center text-slate-500">
+              <TableCell colSpan={colSpan} className="py-8 text-center text-slate-500">
                 {emptyMessage}
               </TableCell>
             </TableRow>
           ) : (
-            data.map((record) => (
+            data.map((record, index) => (
               <TableRow
-                key={record.date}
+                key={`${record.employeeName ?? "employee"}-${record.date}-${index}`}
                 className={cn(record.hasDataWarning && "bg-red-50/90 hover:bg-red-50/90")}
               >
+                {showEmployeeColumn && <TableCell>{record.employeeName ?? "-"}</TableCell>}
                 <TableCell className={cn("tabular-nums tracking-tight", getDateTextClassName(record.date))}>
                   {record.date}
                 </TableCell>
@@ -132,14 +144,20 @@ export function AttendanceTable({
                   <Badge
                     className={cn(
                       "font-medium",
-                      record.hasDataWarning
+                      record.warningType && record.warningType !== "-"
                         ? "bg-red-100 text-red-800 hover:bg-red-100"
-                        : "bg-emerald-100 text-emerald-800 hover:bg-emerald-100",
+                        : record.isLate || record.isUnder9h
+                          ? "bg-amber-100 text-amber-800 hover:bg-amber-100"
+                          : record.highOvertimeDay
+                            ? "bg-blue-100 text-blue-800 hover:bg-blue-100"
+                            : "bg-emerald-100 text-emerald-800 hover:bg-emerald-100",
                     )}
                   >
                     {record.statusBadgeLabel}
                   </Badge>
                 </TableCell>
+                {showWarningColumns && <TableCell>{record.warningType ?? "-"}</TableCell>}
+                {showWarningColumns && <TableCell>{record.warningMessage ?? "-"}</TableCell>}
               </TableRow>
             ))
           )}
